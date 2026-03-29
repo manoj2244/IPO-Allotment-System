@@ -1,1 +1,2 @@
 # IPO-Allotment-System
+functionality
