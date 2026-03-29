@@ -163,6 +163,14 @@ export class EntriesService {
     });
   }
 
+  async remove(entryId: number) {
+    const existing = await this.prisma.ipoEntry.findUnique({ where: { id: entryId } });
+    if (!existing) throw new NotFoundException('Entry not found');
+
+    await this.prisma.ipoEntry.delete({ where: { id: entryId } });
+    return { message: 'Entry deleted' };
+  }
+
   async bulkUpload(ipoId: number, fileBuffer: Buffer, userId: number) {
     const ipo = await this.prisma.ipoMaster.findUnique({ where: { id: ipoId } });
     if (!ipo) throw new NotFoundException('IPO not found');

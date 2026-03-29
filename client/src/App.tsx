@@ -10,6 +10,7 @@ import {
   Input,
   InputNumber,
   Layout,
+  Modal,
   Popconfirm,
   Row,
   Select,
@@ -20,7 +21,7 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { InboxOutlined, LogoutOutlined, ReloadOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, InboxOutlined, LogoutOutlined, ReloadOutlined, SendOutlined, UploadOutlined } from '@ant-design/icons';
 import { Controller, useForm } from 'react-hook-form';
 import axios from 'axios';
 import dayjs from 'dayjs';
@@ -80,9 +81,13 @@ function App() {
   const [users, setUsers] = useState<Array<{ id: number; fullName: string; email: string; role: Role; isActive: boolean }>>([]);
   const [banks, setBanks] = useState<string[]>([]);
   const [addresses, setAddresses] = useState<AddressItem[]>([]);
+  const [reportRows, setReportRows] = useState<Array<Record<string, unknown>>>([]);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<IpoEntry | null>(null);
   const [savingIpo, setSavingIpo] = useState(false);
   const [savingEntry, setSavingEntry] = useState(false);
   const [savingUser, setSavingUser] = useState(false);
+  const [savingEditEntry, setSavingEditEntry] = useState(false);
 
   const ipoForm = useForm<IpoForm>({
     defaultValues: {
@@ -121,6 +126,24 @@ function App() {
       email: '',
       password: '',
       role: 'STAFF',
+    },
+  });
+
+  const editEntryForm = useForm<EntryForm>({
+    defaultValues: {
+      formNo: '',
+      dateBs: '',
+      boid: '',
+      name: '',
+      fatherName: '',
+      grandfatherName: '',
+      citizenshipNo: '',
+      bankName: '',
+      accountNo: '',
+      mobileNo: '',
+      appliedUnits: 10,
+      remarks: '',
+      panNo: '',
     },
   });
 
@@ -277,6 +300,56 @@ function App() {
     message.error(fields.length ? `Fill required user fields: ${fields.join(', ')}` : 'Invalid user form');
   };
 
+  const openEditEntry = (entry: IpoEntry) => {
+    setEditingEntry(entry);
+    editEntryForm.reset({
+      formNo: entry.formNo,
+      dateBs: entry.dateBs,
+      boid: entry.boid,
+      name: entry.name,
+      fatherName: entry.fatherName,
+      grandfatherName: entry.grandfatherName,
+      citizenshipNo: entry.citizenshipNo,
+      bankName: entry.bankName,
+      accountNo: entry.accountNo,
+      mobileNo: entry.mobileNo,
+      appliedUnits: entry.appliedUnits,
+      remarks: entry.remarks || '',
+      panNo: entry.panNo || '',
+    });
+  };
+
+  const onUpdateEntry = async (values: EntryForm) => {
+    if (!editingEntry || !selectedIpoId) return;
+    try {
+      setSavingEditEntry(true);
+      await api.patch(`/entries/${editingEntry.id}`, values);
+      message.success('Entry updated');
+      setEditingEntry(null);
+      await loadEntries(selectedIpoId);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    } finally {
+      setSavingEditEntry(false);
+    }
+  };
+
+  const onUpdateEntryInvalid = () => {
+    const fields = Object.keys(editEntryForm.formState.errors);
+    message.error(fields.length ? `Fill required entry fields: ${fields.join(', ')}` : 'Invalid entry form');
+  };
+
+  const onDeleteEntry = async (entryId: number) => {
+    if (!selectedIpoId) return;
+    try {
+      await api.delete(`/entries/${entryId}`);
+      message.success('Entry deleted');
+      await loadEntries(selectedIpoId);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    }
+  };
+
   const parseDateBsToDayjs = (value?: string) => {
     if (!value) return null;
     const [d, m, y] = value.split('/');
@@ -326,6 +399,21 @@ function App() {
     return false;
   };
 
+  const onClearAllotmentForReupload = async () => {
+    if (!selectedIpoId) {
+      message.warning('Select IPO first');
+      return;
+    }
+
+    try {
+      const { data } = await api.delete(`/allotments/ipo/${selectedIpoId}/clear`);
+      message.success(data.message || 'Allotment cleared');
+      await loadEntries(selectedIpoId);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    }
+  };
+
   const onExportEntries = () => {
     if (!selectedIpoId) return;
     window.open(`${api.defaults.baseURL}/entries/export?ipoId=${selectedIpoId}`, '_blank');
@@ -343,6 +431,24 @@ function App() {
       message.success(`${data.sent} emails sent`);
     } catch (error) {
       message.error(getErrorMessage(error));
+    }
+  };
+
+  const loadReport = async (type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched') => {
+    if (!selectedIpoId) {
+      message.warning('Select IPO first');
+      return;
+    }
+
+    try {
+      setReportLoading(true);
+      const { data } = await api.get<Array<Record<string, unknown>>>(`/allotments/ipo/${selectedIpoId}/report/${type}`);
+      setReportRows(data);
+      message.success(`${type} report loaded (${data.length})`);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    } finally {
+      setReportLoading(false);
     }
   };
 
@@ -787,10 +893,23 @@ function App() {
                       <p className="ant-upload-drag-icon"><InboxOutlined /></p>
                       <p>Drop entry Excel here or click to upload</p>
                     </Dragger>
-                    <Dragger beforeUpload={(file) => void onUploadAllotment(file)} showUploadList={false} accept=".xlsx,.xls">
-                      <p className="ant-upload-drag-icon"><UploadOutlined /></p>
-                      <p>Drop allotment Excel here (Admin)</p>
-                    </Dragger>
+                    {session.role === 'ADMIN' ? (
+                      <>
+                        <Space>
+                          <Popconfirm
+                            title="Clear existing allotment data for this IPO?"
+                            description="This will reset allotment/refund status and allow fresh upload."
+                            onConfirm={() => void onClearAllotmentForReupload()}
+                          >
+                            <Button danger>Clear Allotment (Re-upload)</Button>
+                          </Popconfirm>
+                        </Space>
+                        <Dragger beforeUpload={(file) => void onUploadAllotment(file)} showUploadList={false} accept=".xlsx,.xls">
+                          <p className="ant-upload-drag-icon"><UploadOutlined /></p>
+                          <p>Drop allotment Excel here (Admin)</p>
+                        </Dragger>
+                      </>
+                    ) : null}
                   </Space>
                 </Card>
               ),
@@ -829,9 +948,98 @@ function App() {
                       { title: 'Account', dataIndex: 'accountNo' },
                       { title: 'Mobile', dataIndex: 'mobileNo' },
                       { title: 'Applied', dataIndex: 'appliedUnits' },
+                      { title: 'Allotted', dataIndex: 'allottedUnits' },
+                      { title: 'Refund Units', dataIndex: 'refundUnits' },
+                      { title: 'Refund Amount', dataIndex: 'refundAmount' },
                       { title: 'Deposit', dataIndex: 'depositAmount' },
                       { title: 'District', dataIndex: 'district' },
+                      {
+                        title: 'Allotment Status',
+                        dataIndex: 'entryStatus',
+                        render: (value: IpoEntry['entryStatus']) => {
+                          if (value === 'ALLOTTED') return <Tag color="green">ALLOTTED</Tag>;
+                          if (value === 'NOT_ALLOTTED') return <Tag color="orange">NOT_ALLOTTED</Tag>;
+                          return <Tag>PENDING</Tag>;
+                        },
+                      },
+                      {
+                        title: 'Action',
+                        key: 'action',
+                        fixed: 'right',
+                        width: 140,
+                        render: (_, record) => (
+                          <Space>
+                            <Button size="small" icon={<EditOutlined />} onClick={() => openEditEntry(record)}>
+                              Edit
+                            </Button>
+                            <Popconfirm title="Delete this entry?" onConfirm={() => void onDeleteEntry(record.id)}>
+                              <Button size="small" danger icon={<DeleteOutlined />}>
+                                Delete
+                              </Button>
+                            </Popconfirm>
+                          </Space>
+                        ),
+                      },
                     ]}
+                  />
+
+                  <Modal
+                    title="Edit Entry"
+                    open={!!editingEntry}
+                    onCancel={() => setEditingEntry(null)}
+                    onOk={() => void editEntryForm.handleSubmit(onUpdateEntry, onUpdateEntryInvalid)()}
+                    okButtonProps={{ loading: savingEditEntry }}
+                    width={900}
+                  >
+                    <Row gutter={12}>
+                      <Col span={8}><Form.Item label="Form No" required><Controller name="formNo" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Date" required><Controller name="dateBs" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="BOID" required><Controller name="boid" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Name" required><Controller name="name" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Father Name" required><Controller name="fatherName" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Grandfather/Spouse" required><Controller name="grandfatherName" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Citizenship No" required><Controller name="citizenshipNo" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Bank Name" required><Controller name="bankName" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Select value={field.value || undefined} onChange={field.onChange} options={banks.map((b) => ({ value: b, label: b }))} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Account No" required><Controller name="accountNo" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Mobile No" required><Controller name="mobileNo" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="Units Applied" required><Controller name="appliedUnits" control={editEntryForm.control} rules={{ required: true }} render={({ field }) => <InputNumber value={field.value} onChange={(v) => field.onChange(Number(v || 0))} style={{ width: '100%' }} min={1} />} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label="PAN No / Email"><Controller name="panNo" control={editEntryForm.control} render={({ field }) => <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />} /></Form.Item></Col>
+                      <Col span={24}><Form.Item label="Remarks"><Controller name="remarks" control={editEntryForm.control} render={({ field }) => <Input.TextArea value={field.value} onChange={(e) => field.onChange(e.target.value)} rows={2} />} /></Form.Item></Col>
+                    </Row>
+                  </Modal>
+                </Card>
+              ),
+            },
+            {
+              key: 'allotmentReports',
+              label: 'Allotment Reports',
+              children: (
+                <Card
+                  title="Allotment & Refund Reports"
+                  extra={
+                    <Space>
+                      <Button onClick={() => void loadReport('refund')}>Refund List</Button>
+                      <Button onClick={() => void loadReport('allotted')}>Allotted List</Button>
+                      <Button onClick={() => void loadReport('not-allotted')}>Not Allotted List</Button>
+                      <Button onClick={() => void loadReport('unmatched')}>Unmatched List</Button>
+                    </Space>
+                  }
+                >
+                  <Table<Record<string, unknown>>
+                    rowKey={(record, index) => String(record.id ?? index)}
+                    loading={reportLoading}
+                    dataSource={reportRows}
+                    scroll={{ x: 1600 }}
+                    columns={
+                      reportRows.length > 0
+                        ? Object.keys(reportRows[0]).map((key) => ({
+                            title: key,
+                            dataIndex: key,
+                            key,
+                            render: (value: unknown) => (typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')),
+                          }))
+                        : []
+                    }
                   />
                 </Card>
               ),

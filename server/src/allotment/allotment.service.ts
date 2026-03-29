@@ -6,6 +6,14 @@ import * as XLSX from 'xlsx';
 import nodemailer from 'nodemailer';
 import { PrismaService } from '../prisma/prisma.service';
 
+type MatchStatus = 'MATCHED_BOID' | 'MATCHED_NAME' | 'AMBIGUOUS' | 'UNMATCHED' | 'BOID_MISMATCH' | 'INVALID';
+
+type UploadFailure = {
+  row: number;
+  reason: string;
+  payload: Record<string, unknown>;
+};
+
 @Injectable()
 export class AllotmentService {
   constructor(
@@ -13,9 +21,76 @@ export class AllotmentService {
     private readonly configService: ConfigService,
   ) {}
 
-  async uploadAllotment(ipoId: number, fileBuffer: Buffer) {
+  async clearForReupload(ipoId: number) {
     const ipo = await this.prisma.ipoMaster.findUnique({ where: { id: ipoId } });
     if (!ipo) throw new NotFoundException('IPO not found');
+
+    await this.prisma.$transaction([
+      this.prisma.allotment.deleteMany({ where: { ipoId } }),
+      this.prisma.ipoEntry.updateMany({
+        where: { ipoId },
+        data: {
+          allottedUnits: 0,
+          refundUnits: 0,
+          refundAmount: new Prisma.Decimal(0),
+          entryStatus: 'PENDING',
+        },
+      }),
+    ]);
+
+    return { message: 'Allotment data cleared. You can re-upload now.' };
+  }
+
+  private normalizeKey(value: string) {
+    return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  private getValueByAliases(row: Record<string, unknown>, aliases: string[]) {
+    const normalizedRow = new Map<string, unknown>();
+    Object.entries(row).forEach(([key, value]) => {
+      normalizedRow.set(this.normalizeKey(key), value);
+    });
+
+    for (const alias of aliases) {
+      const found = normalizedRow.get(this.normalizeKey(alias));
+      if (found !== undefined && found !== null) {
+        return String(found).trim();
+      }
+    }
+
+    return '';
+  }
+
+  private parseNumber(value: string) {
+    const sanitized = value.replace(/,/g, '').trim();
+    if (!sanitized) return NaN;
+    return Number(sanitized);
+  }
+
+  private normalizeName(value: string) {
+    return value
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private normalizeBoid(value: string) {
+    return value.replace(/\D/g, '');
+  }
+
+  private isValidBoid(boid: string) {
+    return /^\d{16}$/.test(boid);
+  }
+
+  async uploadAllotment(ipoId: number, fileBuffer: Buffer, strictAppliedMatch = false) {
+    const ipo = await this.prisma.ipoMaster.findUnique({ where: { id: ipoId } });
+    if (!ipo) throw new NotFoundException('IPO not found');
+
+    const existingForIpo = await this.prisma.allotment.count({ where: { ipoId } });
+    if (existingForIpo > 0) {
+      throw new BadRequestException('Allotment already uploaded for this IPO. Clear existing data before re-upload.');
+    }
 
     let workbook: XLSX.WorkBook;
     try {
@@ -32,47 +107,196 @@ export class AllotmentService {
       raw: false,
     });
 
-    let matchedByBoid = 0;
-    let matchedByName = 0;
+    const ipoEntries = await this.prisma.ipoEntry.findMany({
+      where: { ipoId },
+      orderBy: { id: 'asc' },
+    });
 
-    for (const row of rows) {
-      const boid = String(row['BOID'] ?? '').trim();
-      const name = String(row['Name'] ?? '').trim();
-      const allottedUnits = Number(row['Allotted Units'] ?? 0);
-      if (!name || Number.isNaN(allottedUnits)) continue;
+    const entriesByBoid = new Map<string, typeof ipoEntries>();
+    const entriesByName = new Map<string, typeof ipoEntries>();
 
-      await this.prisma.allotment.create({
-        data: {
-          ipoId,
-          boid: boid || null,
-          name,
-          allottedUnits,
-        },
-      });
+    for (const entry of ipoEntries) {
+      const boidKey = this.normalizeBoid(entry.boid);
+      const nameKey = this.normalizeName(entry.name);
 
-      const matchedEntryByBoid = boid
-        ? await this.prisma.ipoEntry.findFirst({ where: { ipoId, boid } })
-        : null;
-
-      if (matchedEntryByBoid) {
-        matchedByBoid += 1;
-        continue;
+      if (boidKey) {
+        const existing = entriesByBoid.get(boidKey) || [];
+        existing.push(entry);
+        entriesByBoid.set(boidKey, existing);
       }
 
-      const matchedEntryByName = await this.prisma.ipoEntry.findFirst({
-        where: { ipoId, name },
-      });
+      const existingByName = entriesByName.get(nameKey) || [];
+      existingByName.push(entry);
+      entriesByName.set(nameKey, existingByName);
+    }
 
-      if (matchedEntryByName) {
-        matchedByName += 1;
+    const uploadBatch = `${ipoId}-${Date.now()}`;
+    const failures: UploadFailure[] = [];
+    let matchedByBoid = 0;
+    let matchedByName = 0;
+    let ambiguous = 0;
+    let unmatched = 0;
+    let boidMismatch = 0;
+    let invalidCount = 0;
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const rowNumber = i + 2;
+
+      try {
+        const fullName = this.getValueByAliases(row, ['fullName', 'Name']);
+        const boidRaw = this.getValueByAliases(row, ['BOID', 'boid']);
+        const boidNormalized = this.normalizeBoid(boidRaw);
+        const nameNormalized = this.normalizeName(fullName);
+        const appliedQty = this.parseNumber(this.getValueByAliases(row, ['appliedQty', 'applied_units', 'Applied Units']));
+        const allottedQty = this.parseNumber(this.getValueByAliases(row, ['allottedQty', 'allotted_units', 'Allotted Units']));
+        const companyCode = this.getValueByAliases(row, ['CompanyCode', 'company_code', 'companyCode']);
+
+        if (!fullName || Number.isNaN(appliedQty) || Number.isNaN(allottedQty)) {
+          throw new BadRequestException('Required fields missing: fullName, appliedQty, allottedQty');
+        }
+
+        if (companyCode && companyCode !== ipo.companyCode) {
+          // Non-blocking: selected IPO controls processing target.
+          // Keep row processable even when incoming file company code differs.
+        }
+
+        if (boidRaw && !this.isValidBoid(boidNormalized)) {
+          throw new BadRequestException('BOID must be 16 digits when provided');
+        }
+
+        if (allottedQty > appliedQty) {
+          throw new BadRequestException('allottedQty cannot be greater than appliedQty');
+        }
+
+        let matchStatus: MatchStatus = 'UNMATCHED';
+        let matchNote: string | null = null;
+        let matchedEntryId: number | null = null;
+        let matchedEntry: (typeof ipoEntries)[number] | null = null;
+
+        const matchedByBoidCandidates = boidRaw ? entriesByBoid.get(boidNormalized) || [] : [];
+        const matchedByNameCandidates = entriesByName.get(nameNormalized) || [];
+
+        if (matchedByBoidCandidates.length === 1) {
+          matchStatus = 'MATCHED_BOID';
+          matchedEntry = matchedByBoidCandidates[0];
+          matchedEntryId = matchedEntry.id;
+        } else if (matchedByBoidCandidates.length > 1) {
+          matchStatus = 'AMBIGUOUS';
+          matchNote = 'Multiple IPO entries found for same BOID';
+        } else if (!boidRaw) {
+          if (matchedByNameCandidates.length === 1) {
+            matchStatus = 'MATCHED_NAME';
+            matchedEntry = matchedByNameCandidates[0];
+            matchedEntryId = matchedEntry.id;
+          } else if (matchedByNameCandidates.length > 1) {
+            matchStatus = 'AMBIGUOUS';
+            matchNote = 'Multiple entries with same full name';
+          } else {
+            matchStatus = 'UNMATCHED';
+            matchNote = 'No IPO entry found';
+          }
+        } else {
+          if (matchedByNameCandidates.length === 1) {
+            matchStatus = 'MATCHED_NAME';
+            matchedEntry = matchedByNameCandidates[0];
+            matchedEntryId = matchedEntry.id;
+            matchNote = `BOID not found in entries; matched by name with entry BOID ${matchedByNameCandidates[0].boid}`;
+          } else if (matchedByNameCandidates.length > 1) {
+            matchStatus = 'AMBIGUOUS';
+            matchNote = 'BOID not found and full name has multiple matches';
+          } else {
+            matchStatus = 'UNMATCHED';
+            matchNote = 'No IPO entry found for BOID/full name';
+          }
+        }
+
+        const created = await this.prisma.allotment.create({
+          data: {
+            ipoId,
+            fullName,
+            boid: boidNormalized || null,
+            appliedQty,
+            allottedQty,
+            companyCode: companyCode || ipo.companyCode,
+            matchStatus,
+            matchNote,
+            matchedEntryId,
+            uploadBatch,
+          },
+        });
+
+        if (matchStatus === 'MATCHED_BOID' || matchStatus === 'MATCHED_NAME') {
+          if (!matchedEntry) {
+            throw new BadRequestException('Matched entry not found');
+          }
+
+          if (strictAppliedMatch && matchedEntry.appliedUnits !== appliedQty) {
+            await this.prisma.allotment.update({
+              where: { id: created.id },
+              data: {
+                matchStatus: 'INVALID',
+                matchNote: `appliedQty mismatch with entry. entry=${matchedEntry.appliedUnits}, file=${appliedQty}`,
+              },
+            });
+            invalidCount += 1;
+            continue;
+          }
+
+          const effectiveApplied = strictAppliedMatch ? appliedQty : matchedEntry.appliedUnits;
+          const refundUnits = effectiveApplied - allottedQty;
+          if (refundUnits < 0) {
+            await this.prisma.allotment.update({
+              where: { id: created.id },
+              data: {
+                matchStatus: 'INVALID',
+                matchNote: 'Negative refund units detected',
+              },
+            });
+            invalidCount += 1;
+            continue;
+          }
+
+          const refundAmount = Number(ipo.pricePerUnit) * refundUnits;
+
+          await this.prisma.ipoEntry.update({
+            where: { id: matchedEntry.id },
+            data: {
+              allottedUnits: allottedQty,
+              refundUnits,
+              refundAmount: new Prisma.Decimal(refundAmount.toFixed(2)),
+              entryStatus: allottedQty > 0 ? 'ALLOTTED' : 'NOT_ALLOTTED',
+            },
+          });
+
+          if (matchStatus === 'MATCHED_BOID') matchedByBoid += 1;
+          if (matchStatus === 'MATCHED_NAME') matchedByName += 1;
+        } else if (matchStatus === 'AMBIGUOUS') {
+          ambiguous += 1;
+        } else if (matchStatus === 'UNMATCHED') {
+          unmatched += 1;
+        }
+      } catch (error) {
+        failures.push({
+          row: rowNumber,
+          reason: error instanceof Error ? error.message : 'Unknown error',
+          payload: row,
+        });
       }
     }
 
     return {
       message: 'Allotment uploaded',
       totalRows: rows.length,
+      failedCount: failures.length,
+      failures,
       matchedByBoid,
       matchedByName,
+      ambiguous,
+      unmatched,
+      boidMismatch,
+      invalidCount,
+      uploadBatch,
     };
   }
 
@@ -80,33 +304,44 @@ export class AllotmentService {
     const ipo = await this.prisma.ipoMaster.findUnique({ where: { id: ipoId } });
     if (!ipo) throw new NotFoundException('IPO not found');
 
-    const entries = await this.prisma.ipoEntry.findMany({ where: { ipoId } });
-    const allotments = await this.prisma.allotment.findMany({ where: { ipoId } });
-
-    const result = entries.map((entry) => {
-      const byBoid = allotments.find((a) => !!a.boid && a.boid === entry.boid);
-      const byName = allotments.find(
-        (a) => a.name.trim().toLowerCase() === entry.name.trim().toLowerCase(),
-      );
-
-      const allotment = byBoid ?? byName;
-      const allottedUnits = allotment?.allottedUnits ?? 0;
-      const refundUnits = entry.appliedUnits - allottedUnits;
-      const refundAmount = Number(ipo.pricePerUnit) * refundUnits;
-
-      return {
-        applicantName: entry.name,
-        boid: entry.boid,
-        bankName: entry.bankName,
-        accountNumber: entry.accountNo,
-        appliedUnits: entry.appliedUnits,
-        allottedUnits,
-        refundUnits,
-        refundAmount,
-      };
+    return this.prisma.ipoEntry.findMany({
+      where: { ipoId },
+      orderBy: { id: 'asc' },
+      select: {
+        name: true,
+        boid: true,
+        bankName: true,
+        accountNo: true,
+        appliedUnits: true,
+        allottedUnits: true,
+        refundUnits: true,
+        refundAmount: true,
+        entryStatus: true,
+      },
     });
+  }
 
-    return result;
+  async reportByType(
+    ipoId: number,
+    type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched',
+  ) {
+    if (type === 'unmatched') {
+      return this.prisma.allotment.findMany({
+        where: { ipoId, matchStatus: { in: ['UNMATCHED', 'AMBIGUOUS', 'BOID_MISMATCH', 'INVALID'] } },
+        orderBy: { id: 'asc' },
+      });
+    }
+
+    const whereByType: Record<'refund' | 'allotted' | 'not-allotted', Prisma.IpoEntryWhereInput> = {
+      refund: { ipoId, refundAmount: { gt: 0 }, entryStatus: { in: ['ALLOTTED', 'NOT_ALLOTTED'] } },
+      allotted: { ipoId, allottedUnits: { gt: 0 }, entryStatus: 'ALLOTTED' },
+      'not-allotted': { ipoId, allottedUnits: 0, entryStatus: 'NOT_ALLOTTED' },
+    };
+
+    return this.prisma.ipoEntry.findMany({
+      where: whereByType[type],
+      orderBy: { id: 'asc' },
+    });
   }
 
   async refundReportExcel(ipoId: number) {
@@ -134,8 +369,7 @@ export class AllotmentService {
     const ipo = await this.prisma.ipoMaster.findUnique({ where: { id: ipoId } });
     if (!ipo) throw new NotFoundException('IPO not found');
 
-    const entries = await this.prisma.ipoEntry.findMany({ where: { ipoId } });
-    const allotments = await this.prisma.allotment.findMany({ where: { ipoId } });
+    const entries = await this.prisma.ipoEntry.findMany({ where: { ipoId, allottedUnits: { gt: 0 } } });
 
     const host = this.configService.get<string>('SMTP_HOST');
     const port = Number(this.configService.get<string>('SMTP_PORT') || 587);
@@ -161,11 +395,6 @@ export class AllotmentService {
     let sent = 0;
 
     for (const entry of entries) {
-      const allotment =
-        allotments.find((a) => !!a.boid && a.boid === entry.boid) ||
-        allotments.find((a) => a.name.trim().toLowerCase() === entry.name.trim().toLowerCase());
-
-      if (!allotment || allotment.allottedUnits <= 0) continue;
       if (!entry.panNo || !entry.panNo.includes('@')) continue;
 
       await transporter.sendMail({
@@ -181,7 +410,7 @@ export class AllotmentService {
             <ul>
               <li><strong>Company:</strong> ${ipo.companyName}</li>
               <li><strong>Applied Units:</strong> ${entry.appliedUnits}</li>
-              <li><strong>Allotted Units:</strong> ${allotment.allottedUnits}</li>
+              <li><strong>Allotted Units:</strong> ${entry.allottedUnits}</li>
             </ul>
             <p>Thank you.</p>
           </div>

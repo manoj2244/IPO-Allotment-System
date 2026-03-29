@@ -36,7 +36,11 @@ export interface IpoEntry {
   accountNo: string;
   mobileNo: string;
   appliedUnits: number;
+  allottedUnits?: number;
+  refundUnits?: number;
   depositAmount: string;
+  refundAmount?: string;
+  entryStatus?: 'PENDING' | 'ALLOTTED' | 'NOT_ALLOTTED';
   remarks?: string;
   panNo?: string;
   district: string;

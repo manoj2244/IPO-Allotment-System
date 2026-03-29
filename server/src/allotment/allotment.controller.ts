@@ -1,9 +1,12 @@
 import {
   Controller,
+  Delete,
   Get,
   Param,
+  ParseBoolPipe,
   ParseIntPipe,
   Post,
+  Query,
   Res,
   UploadedFile,
   UseGuards,
@@ -27,9 +30,25 @@ export class AllotmentController {
   @UseInterceptors(FileInterceptor('file'))
   upload(
     @Param('ipoId', ParseIntPipe) ipoId: number,
+    @Query('strictAppliedMatch', new ParseBoolPipe({ optional: true })) strictAppliedMatch: boolean | undefined,
     @UploadedFile() file: { buffer: Buffer },
   ) {
-    return this.allotmentService.uploadAllotment(ipoId, file.buffer);
+    return this.allotmentService.uploadAllotment(ipoId, file.buffer, strictAppliedMatch ?? false);
+  }
+
+  @Delete('ipo/:ipoId/clear')
+  @Roles(Role.ADMIN)
+  clearForReupload(@Param('ipoId', ParseIntPipe) ipoId: number) {
+    return this.allotmentService.clearForReupload(ipoId);
+  }
+
+  @Get('ipo/:ipoId/report/:type')
+  @Roles(Role.ADMIN, Role.STAFF)
+  report(
+    @Param('ipoId', ParseIntPipe) ipoId: number,
+    @Param('type') type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched',
+  ) {
+    return this.allotmentService.reportByType(ipoId, type);
   }
 
   @Get('ipo/:ipoId/refund-report')

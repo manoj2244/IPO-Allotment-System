@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseIntPipe,
@@ -50,6 +51,11 @@ export class EntriesController {
     @CurrentUser('userId') userId: number,
   ) {
     return this.entriesService.update(entryId, dto, userId);
+  }
+
+  @Delete(':entryId')
+  remove(@Param('entryId', ParseIntPipe) entryId: number) {
+    return this.entriesService.remove(entryId);
   }
 
   @Post('ipo/:ipoId/upload')
