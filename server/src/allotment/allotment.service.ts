@@ -360,7 +360,47 @@ export class AllotmentService {
       { header: 'Refund Amount', key: 'refundAmount', width: 16 },
     ];
 
-    rows.forEach((r) => ws.addRow(r));
+    rows.forEach((r) => {
+      ws.addRow({
+        applicantName: r.name,
+        boid: r.boid,
+        bankName: r.bankName,
+        accountNumber: r.accountNo,
+        appliedUnits: r.appliedUnits,
+        allottedUnits: r.allottedUnits,
+        refundUnits: r.refundUnits,
+        refundAmount: Number(r.refundAmount),
+      });
+    });
+
+    return workbook.xlsx.writeBuffer();
+  }
+
+  async reportByTypeExcel(
+    ipoId: number,
+    type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched',
+  ) {
+    const rows = await this.reportByType(ipoId, type);
+    const workbook = new ExcelJS.Workbook();
+    const ws = workbook.addWorksheet(`report-${type}`);
+
+    if (rows.length === 0) {
+      ws.columns = [{ header: 'message', key: 'message', width: 30 }];
+      ws.addRow({ message: 'No data' });
+      return workbook.xlsx.writeBuffer();
+    }
+
+    const firstRow = rows[0] as Record<string, unknown>;
+    const keys = Object.keys(firstRow);
+    ws.columns = keys.map((key) => ({ header: key, key, width: 24 }));
+
+    rows.forEach((row) => {
+      const item = row as Record<string, unknown>;
+      const normalized = Object.fromEntries(
+        keys.map((key) => [key, typeof item[key] === 'object' && item[key] !== null ? JSON.stringify(item[key]) : item[key]]),
+      );
+      ws.addRow(normalized);
+    });
 
     return workbook.xlsx.writeBuffer();
   }

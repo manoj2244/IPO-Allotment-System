@@ -15,6 +15,7 @@ import {
   Row,
   Select,
   Space,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -25,6 +26,7 @@ import { DeleteOutlined, EditOutlined, InboxOutlined, LogoutOutlined, ReloadOutl
 import { Controller, useForm } from 'react-hook-form';
 import axios from 'axios';
 import dayjs from 'dayjs';
+import { saveAs } from 'file-saver';
 import { api } from './lib/api';
 import type { AddressItem, Ipo, IpoEntry, LoginResponse, Role } from './types';
 
@@ -67,6 +69,23 @@ type UserForm = {
   role: Role;
 };
 
+type UserRow = {
+  id: number;
+  fullName: string;
+  email: string;
+  role: Role;
+  isActive: boolean;
+};
+
+type EditUserForm = {
+  fullName: string;
+  password?: string;
+  role: Role;
+  isActive: boolean;
+};
+
+type ReportType = 'refund' | 'allotted' | 'not-allotted' | 'unmatched';
+
 function App() {
   const { message } = AntApp.useApp();
   const [session, setSession] = useState<Session | null>(() => {
@@ -78,16 +97,20 @@ function App() {
   const [ipos, setIpos] = useState<Ipo[]>([]);
   const [selectedIpoId, setSelectedIpoId] = useState<number | null>(null);
   const [entries, setEntries] = useState<IpoEntry[]>([]);
-  const [users, setUsers] = useState<Array<{ id: number; fullName: string; email: string; role: Role; isActive: boolean }>>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
   const [banks, setBanks] = useState<string[]>([]);
   const [addresses, setAddresses] = useState<AddressItem[]>([]);
   const [reportRows, setReportRows] = useState<Array<Record<string, unknown>>>([]);
   const [reportLoading, setReportLoading] = useState(false);
+  const [selectedReportType, setSelectedReportType] = useState<ReportType>('refund');
+  const [activeReportType, setActiveReportType] = useState<ReportType>('refund');
   const [editingEntry, setEditingEntry] = useState<IpoEntry | null>(null);
+  const [editingUser, setEditingUser] = useState<UserRow | null>(null);
   const [savingIpo, setSavingIpo] = useState(false);
   const [savingEntry, setSavingEntry] = useState(false);
   const [savingUser, setSavingUser] = useState(false);
   const [savingEditEntry, setSavingEditEntry] = useState(false);
+  const [savingEditUser, setSavingEditUser] = useState(false);
 
   const ipoForm = useForm<IpoForm>({
     defaultValues: {
@@ -144,6 +167,15 @@ function App() {
       appliedUnits: 10,
       remarks: '',
       panNo: '',
+    },
+  });
+
+  const editUserForm = useForm<EditUserForm>({
+    defaultValues: {
+      fullName: '',
+      password: '',
+      role: 'STAFF',
+      isActive: true,
     },
   });
 
@@ -300,6 +332,51 @@ function App() {
     message.error(fields.length ? `Fill required user fields: ${fields.join(', ')}` : 'Invalid user form');
   };
 
+  const openEditUser = (user: UserRow) => {
+    setEditingUser(user);
+    editUserForm.reset({
+      fullName: user.fullName,
+      password: '',
+      role: user.role,
+      isActive: user.isActive,
+    });
+  };
+
+  const onUpdateUser = async (values: EditUserForm) => {
+    if (!editingUser) return;
+    try {
+      setSavingEditUser(true);
+      await api.patch(`/users/${editingUser.id}`, {
+        fullName: values.fullName,
+        role: values.role,
+        isActive: values.isActive,
+        ...(values.password ? { password: values.password } : {}),
+      });
+      message.success('User updated');
+      setEditingUser(null);
+      await loadUsers();
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    } finally {
+      setSavingEditUser(false);
+    }
+  };
+
+  const onUpdateUserInvalid = () => {
+    const fields = Object.keys(editUserForm.formState.errors);
+    message.error(fields.length ? `Fill required user fields: ${fields.join(', ')}` : 'Invalid user form');
+  };
+
+  const onDeleteUser = async (userId: number) => {
+    try {
+      await api.delete(`/users/${userId}`);
+      message.success('User deleted');
+      await loadUsers();
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    }
+  };
+
   const openEditEntry = (entry: IpoEntry) => {
     setEditingEntry(entry);
     editEntryForm.reset({
@@ -414,14 +491,42 @@ function App() {
     }
   };
 
-  const onExportEntries = () => {
-    if (!selectedIpoId) return;
-    window.open(`${api.defaults.baseURL}/entries/export?ipoId=${selectedIpoId}`, '_blank');
+  const onExportEntries = async () => {
+    if (!selectedIpoId) {
+      message.warning('Select IPO first');
+      return;
+    }
+
+    try {
+      const response = await api.get(`/entries/export?ipoId=${selectedIpoId}`, {
+        responseType: 'blob',
+      });
+      const blob = new Blob([
+        response.data,
+      ], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      saveAs(blob, `ipo-entries-${selectedIpoId}.xlsx`);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    }
   };
 
-  const onExportRefund = () => {
-    if (!selectedIpoId) return;
-    window.open(`${api.defaults.baseURL}/allotments/ipo/${selectedIpoId}/refund-report/export`, '_blank');
+  const onExportRefund = async () => {
+    if (!selectedIpoId) {
+      message.warning('Select IPO first');
+      return;
+    }
+
+    try {
+      const response = await api.get(`/allotments/ipo/${selectedIpoId}/refund-report/export`, {
+        responseType: 'blob',
+      });
+      const blob = new Blob([
+        response.data,
+      ], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      saveAs(blob, `refund-report-${selectedIpoId}.xlsx`);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+    }
   };
 
   const onSendAllotmentEmails = async () => {
@@ -434,7 +539,7 @@ function App() {
     }
   };
 
-  const loadReport = async (type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched') => {
+  const loadReport = async (type: ReportType) => {
     if (!selectedIpoId) {
       message.warning('Select IPO first');
       return;
@@ -444,11 +549,32 @@ function App() {
       setReportLoading(true);
       const { data } = await api.get<Array<Record<string, unknown>>>(`/allotments/ipo/${selectedIpoId}/report/${type}`);
       setReportRows(data);
+      setActiveReportType(type);
       message.success(`${type} report loaded (${data.length})`);
     } catch (error) {
       message.error(getErrorMessage(error));
     } finally {
       setReportLoading(false);
+    }
+  };
+
+  const exportReport = async (type: ReportType) => {
+    if (!selectedIpoId) {
+      message.warning('Select IPO first');
+      return;
+    }
+
+    try {
+      const response = await api.get(`/allotments/ipo/${selectedIpoId}/report/${type}/export`, {
+        responseType: 'blob',
+      });
+
+      const blob = new Blob([
+        response.data,
+      ], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      saveAs(blob, `${type}-report-${selectedIpoId}.xlsx`);
+    } catch (error) {
+      message.error(getErrorMessage(error));
     }
   };
 
@@ -533,6 +659,14 @@ function App() {
 
         <Tabs
           style={{ marginTop: 16 }}
+          onChange={(key) => {
+            if (key === 'entries' && selectedIpoId) {
+              void loadEntries(selectedIpoId);
+            }
+            if (key === 'allotmentReports') {
+              void loadReport('refund');
+            }
+          }}
           items={[
             ...(session.role === 'ADMIN'
               ? [
@@ -1018,10 +1152,42 @@ function App() {
                   title="Allotment & Refund Reports"
                   extra={
                     <Space>
-                      <Button onClick={() => void loadReport('refund')}>Refund List</Button>
-                      <Button onClick={() => void loadReport('allotted')}>Allotted List</Button>
-                      <Button onClick={() => void loadReport('not-allotted')}>Not Allotted List</Button>
-                      <Button onClick={() => void loadReport('unmatched')}>Unmatched List</Button>
+                      <Button
+                        type={activeReportType === 'refund' ? 'primary' : 'default'}
+                        onClick={() => void loadReport('refund')}
+                      >
+                        Refund List
+                      </Button>
+                      <Button
+                        type={activeReportType === 'allotted' ? 'primary' : 'default'}
+                        onClick={() => void loadReport('allotted')}
+                      >
+                        Allotted List
+                      </Button>
+                      <Button
+                        type={activeReportType === 'not-allotted' ? 'primary' : 'default'}
+                        onClick={() => void loadReport('not-allotted')}
+                      >
+                        Not Allotted List
+                      </Button>
+                      <Button
+                        type={activeReportType === 'unmatched' ? 'primary' : 'default'}
+                        onClick={() => void loadReport('unmatched')}
+                      >
+                        Unmatched List
+                      </Button>
+                      <Select
+                        style={{ width: 220 }}
+                        value={selectedReportType}
+                        onChange={(value) => setSelectedReportType(value as ReportType)}
+                        options={[
+                          { value: 'refund', label: 'Refund List' },
+                          { value: 'allotted', label: 'Allotted List' },
+                          { value: 'not-allotted', label: 'Not Allotted List' },
+                          { value: 'unmatched', label: 'Unmatched List' },
+                        ]}
+                      />
+                      <Button type="primary" onClick={() => void exportReport(selectedReportType)}>Export</Button>
                     </Space>
                   }
                 >
@@ -1126,8 +1292,87 @@ function App() {
                               dataIndex: 'isActive',
                               render: (value: boolean) => <Tag color={value ? 'green' : 'red'}>{value ? 'Active' : 'Inactive'}</Tag>,
                             },
+                            {
+                              title: 'Action',
+                              key: 'action',
+                              render: (_: unknown, record: UserRow) => (
+                                <Space>
+                                  <Button size="small" icon={<EditOutlined />} onClick={() => openEditUser(record)}>
+                                    Edit
+                                  </Button>
+                                  <Popconfirm title="Delete this user?" onConfirm={() => void onDeleteUser(record.id)}>
+                                    <Button size="small" danger icon={<DeleteOutlined />}>
+                                      Delete
+                                    </Button>
+                                  </Popconfirm>
+                                </Space>
+                              ),
+                            },
                           ]}
                         />
+
+                        <Modal
+                          title="Edit User"
+                          open={!!editingUser}
+                          onCancel={() => setEditingUser(null)}
+                          onOk={() => void editUserForm.handleSubmit(onUpdateUser, onUpdateUserInvalid)()}
+                          okButtonProps={{ loading: savingEditUser }}
+                        >
+                          <Row gutter={12}>
+                            <Col span={24}>
+                              <Form.Item label="Full Name" required>
+                                <Controller
+                                  name="fullName"
+                                  control={editUserForm.control}
+                                  rules={{ required: true }}
+                                  render={({ field }) => (
+                                    <Input value={field.value} onChange={(event) => field.onChange(event.target.value)} />
+                                  )}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col span={24}>
+                              <Form.Item label="New Password (optional)">
+                                <Controller
+                                  name="password"
+                                  control={editUserForm.control}
+                                  render={({ field }) => (
+                                    <Input.Password value={field.value} onChange={(event) => field.onChange(event.target.value)} />
+                                  )}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col span={24}>
+                              <Form.Item label="Role" required>
+                                <Controller
+                                  name="role"
+                                  control={editUserForm.control}
+                                  render={({ field }) => (
+                                    <Select
+                                      value={field.value}
+                                      onChange={field.onChange}
+                                      options={[
+                                        { value: 'ADMIN', label: 'Admin' },
+                                        { value: 'STAFF', label: 'Staff' },
+                                      ]}
+                                    />
+                                  )}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col span={24}>
+                              <Form.Item label="Active Status">
+                                <Controller
+                                  name="isActive"
+                                  control={editUserForm.control}
+                                  render={({ field }) => (
+                                    <Switch checked={!!field.value} onChange={field.onChange} checkedChildren="Active" unCheckedChildren="Inactive" />
+                                  )}
+                                />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </Modal>
                       </Card>
                     ),
                   },

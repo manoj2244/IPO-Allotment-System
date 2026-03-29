@@ -51,6 +51,19 @@ export class AllotmentController {
     return this.allotmentService.reportByType(ipoId, type);
   }
 
+  @Get('ipo/:ipoId/report/:type/export')
+  @Roles(Role.ADMIN, Role.STAFF)
+  async reportExport(
+    @Param('ipoId', ParseIntPipe) ipoId: number,
+    @Param('type') type: 'refund' | 'allotted' | 'not-allotted' | 'unmatched',
+    @Res() res: Response,
+  ) {
+    const data = await this.allotmentService.reportByTypeExcel(ipoId, type);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=${type}-report-${ipoId}.xlsx`);
+    res.send(Buffer.from(data));
+  }
+
   @Get('ipo/:ipoId/refund-report')
   @Roles(Role.ADMIN, Role.STAFF)
   refundReport(@Param('ipoId', ParseIntPipe) ipoId: number) {
