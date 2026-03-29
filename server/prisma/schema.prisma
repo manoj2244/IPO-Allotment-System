@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  fullName     String    @map("full_name") @db.VarChar(150)
+  email        String    @unique @db.VarChar(120)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  role         String    @default("STAFF") @db.VarChar(20)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  createdEntries IpoEntry[] @relation("entry_created_by")
+  updatedEntries IpoEntry[] @relation("entry_updated_by")
+
+  @@map("users")
+}
+
+model IpoMaster {
+  id           Int        @id @default(autoincrement())
+  companyName  String     @map("company_name") @db.VarChar(200)
+  companyCode  String     @unique @map("company_code") @db.VarChar(40)
+  pricePerUnit Decimal    @map("price_per_unit") @db.Decimal(18, 2)
+  district     String     @db.VarChar(100)
+  issuedUnits  Int        @map("issued_units")
+  minUnits     Int        @map("min_units")
+  maxUnits     Int        @map("max_units")
+  status       String     @default("ACTIVE") @db.VarChar(20)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  entries    IpoEntry[]
+  allotments Allotment[]
+
+  @@map("ipo_master")
+}
+
+model IpoEntry {
+  id              Int       @id @default(autoincrement())
+  ipoId           Int       @map("ipo_id")
+  formNo          String    @map("form_no") @db.VarChar(40)
+  dateBs          String    @map("date_bs") @db.VarChar(20)
+  boid            String    @db.VarChar(16)
+  name            String    @db.VarChar(150)
+  fatherName      String    @map("father_name") @db.VarChar(150)
+  grandfatherName String    @map("grandfather_name") @db.VarChar(150)
+  citizenshipNo   String    @map("citizenship_no") @db.VarChar(50)
+  bankName        String    @map("bank_name") @db.VarChar(150)
+  accountNo       String    @map("account_no") @db.VarChar(80)
+  mobileNo        String    @map("mobile_no") @db.VarChar(20)
+  appliedUnits    Int       @map("applied_units")
+  depositAmount   Decimal   @map("deposit_amount") @db.Decimal(18, 2)
+  remarks         String?   @db.VarChar(300)
+  panNo           String?   @map("pan_no") @db.VarChar(30)
+  district        String    @db.VarChar(100)
+  createdById     Int       @map("created_by")
+  updatedById     Int       @map("updated_by")
+  boidVerified    Boolean   @default(false) @map("boid_verified")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  ipo       IpoMaster @relation(fields: [ipoId], references: [id])
+  createdBy User      @relation("entry_created_by", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  updatedBy User      @relation("entry_updated_by", fields: [updatedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ipoId, formNo])
+  @@index([ipoId])
+  @@index([boid])
+  @@map("ipo_entries")
+}
+
+model Allotment {
+  id           Int      @id @default(autoincrement())
+  ipoId        Int      @map("ipo_id")
+  boid         String?  @db.VarChar(16)
+  name         String   @db.VarChar(150)
+  allottedUnits Int     @map("allotted_units")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  ipo IpoMaster @relation(fields: [ipoId], references: [id])
+
+  @@index([ipoId])
+  @@index([boid])
+  @@map("allotment")
+}

@@ -26,3 +26,16 @@ pnpm-debug.log*
 
 # Ignore Markdown files
 *.md
+*.xls
+*.xlsx
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
+*.csv
+*.tsv
+*.json
+*.xml
+*.yml   
+*.txt
